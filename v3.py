@@ -18,6 +18,7 @@ class Chatbot:
     def __init__(
         self,
         api_key: str,
+        openai_api_endpoint: str = "https://api.openai.com/v1/chat/completions",
         engine: str = os.environ.get("GPT_ENGINE") or "gpt-3.5-turbo",
         proxy: str = None,
         timeout: float = None,
@@ -34,6 +35,7 @@ class Chatbot:
         """
         self.engine: str = engine
         self.api_key: str = api_key
+        self.openai_api_endpoint = openai_api_endpoint
         self.system_prompt: str = system_prompt
         self.max_tokens: int = max_tokens or (
             31000 if engine == "gpt-4-32k" else 7000 if engine == "gpt-4" else 4000
@@ -159,8 +161,8 @@ class Chatbot:
         self.__truncate_conversation(convo_id=convo_id)
         # Get response
         response = self.session.post(
-            os.environ.get("API_URL") or "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {kwargs.get('api_key', self.api_key)}"},
+            self.openai_api_endpoint,
+            headers={"api-key": f"{kwargs.get('api_key', self.api_key)}"},
             json={
                 "model": self.engine,
                 "messages": self.conversation[convo_id],
@@ -226,8 +228,8 @@ class Chatbot:
         # Get response
         async with self.aclient.stream(
             "post",
-            os.environ.get("API_URL") or "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {kwargs.get('api_key', self.api_key)}"},
+            self.openai_api_endpoint,
+            headers={"api-key": f"{kwargs.get('api_key', self.api_key)}"},
             json={
                 "model": self.engine,
                 "messages": self.conversation[convo_id],

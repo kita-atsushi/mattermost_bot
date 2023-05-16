@@ -85,7 +85,7 @@ class Bot:
             # request header for !gpt command
             self.headers = {
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.openai_api_key}",
+                "api-key": f"{self.openai_api_key}",
             }
 
             self.askgpt = askGPT(
@@ -94,7 +94,10 @@ class Bot:
                 self.headers,
             )
 
-            self.chatbot = Chatbot(api_key=self.openai_api_key)
+            self.chatbot = Chatbot(
+                api_key=self.openai_api_key,
+                openai_api_endpoint=self.openai_api_endpoint
+            )
         else:
             logger.warning(
                 "openai_api_key is not provided, !gpt and !chat command will not work"
