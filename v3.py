@@ -8,13 +8,25 @@ from typing import AsyncGenerator
 import httpx
 import requests
 import tiktoken
+from log import getlogger
+
+logger = getlogger()
 
 
 class Chatbot:
     """
     Official ChatGPT API
     """
+    _instance = None
 
+    def __new__(cls, api_key, openai_api_endpoint):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance.chatbot = Chatbot(api_key=api_key, openai_api_endpoint=openai_api_endpoint)
+        return cls._instance
+
+    # NOTE: engine name is fixed because tiktoken is not supported for Azure OpenAI Service.
+    #       See this bug: https://github.com/hwchase17/langchain/issues/2854
     def __init__(
         self,
         api_key: str,
@@ -94,6 +106,17 @@ class Chatbot:
         Add a message to the conversation
         """
         self.conversation[convo_id].append({"role": role, "content": message})
+
+    def exists_convo_id(
+        self,
+        convo_id: str,
+    ) -> bool:
+        """
+        Check convo_id in the conversation
+        """
+        ret = convo_id in self.conversation
+        logger.info("Checking convo_id in the conversation. result=%s" % ret)
+        return ret
 
     def __truncate_conversation(self, convo_id: str = "default") -> None:
         """
@@ -226,6 +249,7 @@ class Chatbot:
         self.add_to_conversation(prompt, "user", convo_id=convo_id)
         self.__truncate_conversation(convo_id=convo_id)
         # Get response
+        logger.info("Execute azure openai service api.", extra={'custom_dimensions': {'convo_id': convo_id, 'api_url': self.openai_api_endpoint}})
         async with self.aclient.stream(
             "post",
             self.openai_api_endpoint,

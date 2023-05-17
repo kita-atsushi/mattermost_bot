@@ -5,11 +5,7 @@ import asyncio
 import re
 import os
 import aiohttp
-from askgpt import askGPT
 from v3 import Chatbot
-from bing import BingBot
-from bard import Bardbot
-from BingImageGen import ImageGenAsync
 from log import getlogger
 
 logger = getlogger()
@@ -25,9 +21,6 @@ class Bot:
         password: Optional[str] = None,
         openai_api_key: Optional[str] = None,
         openai_api_endpoint: Optional[str] = None,
-        bing_api_endpoint: Optional[str] = None,
-        bard_token: Optional[str] = None,
-        bing_auth_cookie: Optional[str] = None,
         port: int = 443,
         timeout: int = 30,
     ) -> None:
@@ -82,62 +75,17 @@ class Bot:
         self.openai_api_key = openai_api_key
         # initialize chatGPT class
         if self.openai_api_key is not None:
-            # request header for !gpt command
             self.headers = {
                 "Content-Type": "application/json",
                 "api-key": f"{self.openai_api_key}",
             }
 
-            self.askgpt = askGPT(
-                self.session,
-                self.openai_api_endpoint,
-                self.headers,
-            )
-
             self.chatbot = Chatbot(
                 api_key=self.openai_api_key,
                 openai_api_endpoint=self.openai_api_endpoint
-            )
+            ).chatbot
         else:
-            logger.warning(
-                "openai_api_key is not provided, !gpt and !chat command will not work"
-            )
-
-        self.bing_api_endpoint = bing_api_endpoint
-        # initialize bingbot
-        if self.bing_api_endpoint is not None:
-            self.bingbot = BingBot(
-                session=self.session,
-                bing_api_endpoint=self.bing_api_endpoint,
-            )
-        else:
-            logger.warning(
-                "bing_api_endpoint is not provided, !bing command will not work"
-            )
-
-        self.bard_token = bard_token
-        # initialize bard
-        if self.bard_token is not None:
-            self.bardbot = Bardbot(session_id=self.bard_token)
-        else:
-            logger.warning("bard_token is not provided, !bard command will not work")
-
-        self.bing_auth_cookie = bing_auth_cookie
-        # initialize image generator
-        if self.bing_auth_cookie is not None:
-            self.imagegen = ImageGenAsync(auth_cookie=self.bing_auth_cookie)
-        else:
-            logger.warning(
-                "bing_auth_cookie is not provided, !pic command will not work"
-            )
-
-        # regular expression to match keyword [!gpt {prompt}] [!chat {prompt}] [!bing {prompt}] [!pic {prompt}] [!bard {prompt}]
-        self.gpt_prog = re.compile(r"^\s*!gpt\s*(.+)$")
-        self.chat_prog = re.compile(r"^\s*!chat\s*(.+)$")
-        self.bing_prog = re.compile(r"^\s*!bing\s*(.+)$")
-        self.bard_prog = re.compile(r"^\s*!bard\s*(.+)$")
-        self.pic_prog = re.compile(r"^\s*!pic\s*(.+)$")
-        self.help_prog = re.compile(r"^\s*!help\s*.*$")
+            logger.warning("openai_api_key is not provided")
 
     # close session
     def __del__(self) -> None:
@@ -162,112 +110,82 @@ class Bot:
                 raw_data = response["data"]["post"]
                 raw_data_dict = json.loads(raw_data)
                 user_id = raw_data_dict["user_id"]
+                post_id = raw_data_dict["id"]
                 channel_id = raw_data_dict["channel_id"]
+                channel_display_name = response["data"]["channel_display_name"]
                 sender_name = response["data"]["sender_name"]
                 raw_message = raw_data_dict["message"]
+
+                post_id = raw_data_dict["id"]
+                root_id = raw_data_dict["root_id"]
+
+                if not raw_message.startswith(self.username):
+                    return
+
+                send_message = ""
+                if root_id == '':
+                    # First post
+                    root_id = post_id
+                    send_message = raw_message
+                else:
+                    if not self.chatbot.exists_convo_id(root_id):
+                        send_message = self._add_past_messages(raw_message, post_id)
+                    else:
+                        send_message = raw_message
                 try:
+                    prop = {
+                        'event_type': event_type, 'sender_name': sender_name, 'message': send_message,
+                        'channel_display_name': channel_display_name, 'root_id': root_id, 'post_id': post_id
+                    }
+                    logger.info(json.dumps(prop, ensure_ascii=False), extra={'custom_dimensions': prop})
                     asyncio.create_task(
                         self.message_callback(
-                            raw_message, channel_id, user_id, sender_name
+                            send_message, channel_id, user_id, sender_name, root_id
                         )
                     )
                 except Exception as e:
-                    await asyncio.to_thread(self.send_message, channel_id, f"{e}")
+                    await asyncio.to_thread(self.send_message, channel_id, root_id, f"{e}")
 
     # message callback
     async def message_callback(
-        self, raw_message: str, channel_id: str, user_id: str, sender_name: str
+        self, raw_message: str, channel_id: str, user_id: str, sender_name: str, root_id: str
     ) -> None:
         # prevent command trigger loop
         if sender_name != self.username:
-            message = raw_message
+            prompt = raw_message.lstrip(self.username)
+            try:
+                logger.info("Starting chat", extra={'custom_dimensions': {'root_id': root_id, 'sender_name': sender_name}})
+                response = await self.chat(prompt, root_id)
+                await asyncio.to_thread(
+                    self.send_message, channel_id, root_id, f"{response}"
+                )
+            except Exception as e:
+                logger.error(e, exc_info=True)
+                raise Exception(e)
 
-            if self.openai_api_key is not None:
-                # !gpt command trigger handler
-                if self.gpt_prog.match(message):
-                    prompt = self.gpt_prog.match(message).group(1)
-                    try:
-                        response = await self.gpt(prompt)
-                        await asyncio.to_thread(
-                            self.send_message, channel_id, f"{response}"
-                        )
-                    except Exception as e:
-                        logger.error(e, exc_info=True)
-                        raise Exception(e)
+    def _add_past_messages(self, message: str, post_id: str) -> str:
+        messages = [message]
+        past_conversations = self._get_thread_posts(post_id)
+        max_past = 2
+        for order in past_conversations['order'][1:max_past]:
+            raw_post = past_conversations['posts'][order]['message']
+            messages.append(raw_post)
+        return "\n".join(messages)
 
-                # !chat command trigger handler
-                elif self.chat_prog.match(message):
-                    prompt = self.chat_prog.match(message).group(1)
-                    try:
-                        response = await self.chat(prompt)
-                        await asyncio.to_thread(
-                            self.send_message, channel_id, f"{response}"
-                        )
-                    except Exception as e:
-                        logger.error(e, exc_info=True)
-                        raise Exception(e)
-
-            if self.bing_api_endpoint is not None:
-                # !bing command trigger handler
-                if self.bing_prog.match(message):
-                    prompt = self.bing_prog.match(message).group(1)
-                    try:
-                        response = await self.bingbot.ask_bing(prompt)
-                        await asyncio.to_thread(
-                            self.send_message, channel_id, f"{response}"
-                        )
-                    except Exception as e:
-                        logger.error(e, exc_info=True)
-                        raise Exception(e)
-
-            if self.bard_token is not None:
-                # !bard command trigger handler
-                if self.bard_prog.match(message):
-                    prompt = self.bard_prog.match(message).group(1)
-                    try:
-                        # response is dict object
-                        response = await self.bard(prompt)
-                        content = str(response["content"]).strip()
-                        await asyncio.to_thread(
-                            self.send_message, channel_id, f"{content}"
-                        )
-                    except Exception as e:
-                        logger.error(e, exc_info=True)
-                        raise Exception(e)
-
-            if self.bing_auth_cookie is not None:
-                # !pic command trigger handler
-                if self.pic_prog.match(message):
-                    prompt = self.pic_prog.match(message).group(1)
-                    # generate image
-                    try:
-                        links = await self.imagegen.get_images(prompt)
-                        image_path = await self.imagegen.save_images(links, "images")
-                    except Exception as e:
-                        logger.error(e, exc_info=True)
-                        raise Exception(e)
-
-                    # send image
-                    try:
-                        await asyncio.to_thread(
-                            self.send_file, channel_id, prompt, image_path
-                        )
-                    except Exception as e:
-                        logger.error(e, exc_info=True)
-                        raise Exception(e)
-
-            # !help command trigger handler
-            if self.help_prog.match(message):
-                try:
-                    await asyncio.to_thread(self.send_message, channel_id, self.help())
-                except Exception as e:
-                    logger.error(e, exc_info=True)
+    def _get_thread_posts(self, post_id: str) -> dict:
+        resp_posts = self.driver.posts.get_thread(post_id)
+        # NOTE: sort desc order by posts.create_at
+        sorted_posts = sorted(resp_posts['posts'].values(), key=lambda x: x['create_at'], reverse=True)
+        resp_posts['posts'] = {post['id']: post for post in sorted_posts}
+        resp_posts['order'] = [post['id'] for post in sorted_posts]
+        return resp_posts
 
     # send message to room
-    def send_message(self, channel_id: str, message: str) -> None:
+    def send_message(self, channel_id: str, root_id: str, message: str) -> None:
         self.driver.posts.create_post(
             options={
                 "channel_id": channel_id,
+                "root_id": root_id,
                 "message": message,
             }
         )
@@ -300,30 +218,5 @@ class Bot:
             logger.error(e, exc_info=True)
             raise Exception(e)
 
-    # !gpt command function
-    async def gpt(self, prompt: str) -> str:
-        return await self.askgpt.oneTimeAsk(prompt)
-
-    # !chat command function
-    async def chat(self, prompt: str) -> str:
-        return await self.chatbot.ask_async(prompt)
-
-    # !bing command function
-    async def bing(self, prompt: str) -> str:
-        return await self.bingbot.ask_bing(prompt)
-
-    # !bard command function
-    async def bard(self, prompt: str) -> str:
-        return await asyncio.to_thread(self.bardbot.ask, prompt)
-
-    # !help command function
-    def help(self) -> str:
-        help_info = (
-            "!gpt [content], generate response without context conversation\n"
-            + "!chat [content], chat with context conversation\n"
-            + "!bing [content], chat with context conversation powered by Bing AI\n"
-            + "!bard [content], chat with Google's Bard\n"
-            + "!pic [prompt], Image generation by Microsoft Bing\n"
-            + "!help, help message"
-        )
-        return help_info
+    async def chat(self, prompt: str, root_id: str) -> str:
+        return await self.chatbot.ask_async(prompt, convo_id=root_id)
